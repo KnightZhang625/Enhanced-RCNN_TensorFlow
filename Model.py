@@ -49,27 +49,31 @@ class ERCNNModel(object):
     config = copy.deepcopy(config)
 
     # RNN
-    vocab_size = config.vocab_size
-    embedding_size = config.embedding_size
-    num_layers = config.num_layers
-    hidden_size = config.hidden_size
-    forget_bias = config.forget_bias
+    self.vocab_size = config.vocab_size
+    self.embedding_size = config.embedding_size
+    self.num_layers = config.num_layers
+    self.hidden_size = config.hidden_size
+    self.forget_bias = config.forget_bias
+    self.sent_length_A = sent_length_A
 
     # CNN
-    kernel_size = config.kernel_size
-    pool_size= config.pool_size
+    self.kernel_size = config.kernel_size
+    self.pool_size= config.pool_size
 
     self.initializer_range = config.initializer_range
     self.dropout = config.dropout
     if not is_training:
       self.dropout = 0.0
+    
+    if is_training:
+      self.output = self.build(sent_A, sent_B, sent_length_A, sent_length_B)
 
   def build(self,
             sent_A,
             sent_B,
             sent_length_A,
             sent_length_B,
-            scope):
+            scope=None):
     # RNN Encoder
     encoder_outputs_A = RNNEncoder(sent_A,
                                    sent_length_A,
@@ -115,24 +119,60 @@ class ERCNNModel(object):
     v_b_avg = tf.reduce_mean(V_b, axis=-1)
 
     # concatenate the final output
-    # (b, 3*s_a - 4)
-    output_a = tf.concat((v_a_max, cnn_output_A, v_a_avg))
-    # (b, 3*s_b - 4)
-    output_b = tf.concat((v_b_max, cnn_output_B, v_b_avg))
+    # (8*s_a -8)
+    output_a = tf.concat((v_a_max, cnn_output_A, v_a_avg), axis=-1)
+    # (8*s_b -8)
+    output_b = tf.concat((v_b_max, cnn_output_B, v_b_avg), axis=-1)
 
-  def similarity_model(output_a, output_b):
-    def model_func(input_a, input_b):
-      with tf.variable_scope('similarity'):
-        w = tf.Variable(tf.truncated_normal([self.seq_length_A * 12 - 16, self.seq_length_A]), name='w')
-        b = tf.Variable(tf.truncated_normal([1], stddev=0.1), name='b')
-      # (3s - 4) * 4 = 12s - 16
+    output = self.similarity_model(output_a, output_b)
+
+    with tf.variable_scope('prediction'):
+      layer_size = _mh.get_shape_list(output)[1] // 2
+      output = tf.layers.dense(output,
+                               layer_size,
+                               activation=tf.nn.tanh,
+                               name='layer_mid',
+                               kernel_initializer=_mh.create_initializer(initializer_range=self.initializer_range))
+      output = tf.layers.dense(output,
+                               2,
+                               activation=tf.nn.tanh,
+                               name='layer_final',
+                               kernel_initializer=_mh.create_initializer(initializer_range=self.initializer_range))
+    
+    return output
+
+  def similarity_model(self, output_a, output_b):
+    def model_func(input_a, input_b, scope):
+      with tf.variable_scope(scope):
+        shape = [(self.sent_length_A[0] * 8 - 8) * 4, self.sent_length_A[0] * 8 - 8]
+        w = tf.Variable(tf.truncated_normal(shape, stddev=0.1), name='w')
+        b = tf.Variable(tf.truncated_normal([self.sent_length_A[0] * 8 - 8], stddev=0.1), name='b')
       input_concat = tf.concat((input_a, input_b, tf.multiply(input_a, input_b), input_a - input_b), axis=-1)
-      output = tf.nn.tanh(tf.matmul(input_concat, w) + b)
+
+      output = tf.nn.tanh(tf.nn.bias_add(tf.matmul(input_concat, w), b))
       return output
-    
+
+    def build_gate(input_a, input_b, scope):
+      with tf.variable_scope(scope):
+        input_concat = tf.concat((input_a, input_b), axis=-1)
+        w_g = tf.Variable(tf.truncated_normal([(self.sent_length_A[0] * 8 - 8) * 2, self.sent_length_A[0] * 8 - 8]), name='w')
+        # (b, seq_length)
+        gate = tf.sigmoid(tf.matmul(input_concat, w_g))
+      return gate
+
     # (b, s)
-    m_oa_mb = model_func(output_a, output_b)
-    
+    m_oa_ob = model_func(output_a, output_b, scope='m_a')
+    m_ob_oa = model_func(output_b, output_a, scope='m_b')
+
+    # State Function
+    gate_a = build_gate(output_a, output_b, scope='gate_a')
+    gate_b = build_gate(output_b, output_a, scope='gate_b')
+
+    output_a = tf.multiply(gate_a, m_oa_ob) + (1 - gate_a) * output_a
+    output_b = tf.multiply(gate_b, m_ob_oa) + (1 - gate_b) * output_b
+    output_concat = tf.concat((output_a, output_b), axis=-1)
+
+    return output_concat
     
 def RNNEncoder(input_text,
                input_length,
@@ -145,7 +185,7 @@ def RNNEncoder(input_text,
                initializer_range,
                scope=None):
   # Embedding
-  with tf.variable_scope('Embedding'):
+  with tf.variable_scope('Embedding', reuse=tf.AUTO_REUSE):
     embedding_table = _mh.create_embedding(vocab_size,
                                             embedding_size,
                                             name='nmt_embedding',
@@ -153,7 +193,7 @@ def RNNEncoder(input_text,
     embedded_input = tf.nn.embedding_lookup(embedding_table, input_text)
   
   # RNN
-  with tf.variable_scope('RNN'):
+  with tf.variable_scope('RNN', reuse=tf.AUTO_REUSE):
     assert_op = tf.assert_equal(num_layers % 2, 0)
     with tf.control_dependencies([assert_op]):
       num_bi_layers = int(num_layers / 2)
@@ -186,7 +226,7 @@ def CNNExtractor(inputs,
                  pool_size,
                  dropout,
                  initializer_range,
-                 scope):
+                 scope=None):
   # (b, s, h, 1)
   inputs = tf.expand_dims(inputs, -1)
 
@@ -196,12 +236,13 @@ def CNNExtractor(inputs,
     h_1 = customized_cnn(inputs, filter_shape)
     # (b, s, 1, 1)
     pooled_max_1 = tf.nn.max_pool(h_1,
-                                  ksize=[1, 1, pool_size[i], 1],
+                                  ksize=[1, 1, pool_size[0], 1],
+                                  strides=[1, 1, 1, 1],
                                   padding='VALID',
                                   name='max_pool')
     # (b, s, 1, 1)
     pooled_avg_1 = tf.nn.avg_pool(h_1,
-                                ksize=[1, 1, pool_size[i], 1],
+                                ksize=[1, 1, pool_size[0], 1],
                                 strides=[1, 1, 1, 1],
                                 padding='VALID',
                                 name='avg_pool')
@@ -212,12 +253,13 @@ def CNNExtractor(inputs,
     h_2 = customized_cnn(h_1, filter_shape)
     # (b, s-2+1, 1, 1)
     pooled_max_2 = tf.nn.max_pool(h_2,
-                                  ksize=[1, 1, pool_size[i], 1],
+                                  ksize=[1, 1, pool_size[1], 1],
+                                  strides=[1, 1, 1, 1],
                                   padding='VALID',
                                   name='max_pool')
     # (b, s-2+1, 1, 1)
     pooled_avg_2 = tf.nn.avg_pool(h_2,
-                                ksize=[1, 1, pool_size[i], 1],
+                                ksize=[1, 1, pool_size[1], 1],
                                 strides=[1, 1, 1, 1],
                                 padding='VALID',
                                 name='avg_pool')
@@ -228,12 +270,14 @@ def CNNExtractor(inputs,
     h_3 = customized_cnn(h_2, filter_shape)
     # (b, s-3+1, 1, 1)
     pooled_max_3 = tf.nn.max_pool(h_3,
-                                  ksize=[1, 1, pool_size[i], 1],
+                                  ksize=[1, 1, pool_size[2], 1],
+                                  strides=[1, 1, 1, 1],
                                   padding='VALID',
                                   name='max_pool')
+
     # (b, s-3+1, 1, 1)
     pooled_avg_3 = tf.nn.avg_pool(h_3,
-                                ksize=[1, 1, pool_size[i], 1],
+                                ksize=[1, 1, pool_size[2], 1],
                                 strides=[1, 1, 1, 1],
                                 padding='VALID',
                                 name='avg_pool')
@@ -248,9 +292,8 @@ def CNNExtractor(inputs,
   # (b, s-4)
   output = tf.concat((pooled_max_1, pooled_avg_1,
                       pooled_max_2, pooled_avg_2,
-                      pooled_max_3, pooled_avg_3)
+                      pooled_max_3, pooled_avg_3),
                       axis=-1)
-
   return output
 
 def customized_cnn(inputs, filter_shape):
@@ -272,3 +315,26 @@ def AttentionLayer(query,
     context = tf.matmul(attn_probs, value)
 
     return context
+
+
+if __name__ == '__main__':
+  class Config():
+    vocab_size = 32
+    embedding_size = 32
+    num_layers = 4
+    hidden_size = 32
+    forget_bias = 1.0
+
+    kernel_size = [1, 2, 3]
+    pool_size = [64, 63, 61]
+
+    initializer_range = 0.01
+    dropout = 0.1
+  
+  config = Config()
+  sent_A = tf.constant([[1, 2, 3, 4, 5, 6], [4, 5, 6, 7, 8, 9]], dtype=tf.int32)
+  sent_B = tf.constant([[1, 2, 3, 4, 5, 6], [4, 5, 6, 7, 8, 9]], dtype=tf.int32)
+  sent_length_A = tf.constant([6, 6], dtype=tf.int32)
+  sent_length_B = tf.constant([6, 6], dtype=tf.int32)
+
+  model = ERCNNModel(config, True, sent_A, sent_B, sent_length_A, sent_length_B)

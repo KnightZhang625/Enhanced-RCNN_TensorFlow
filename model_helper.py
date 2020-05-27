@@ -3,14 +3,12 @@
 import sys
 import six
 import tensorflow as tf
+import config as _cg
 
 from pathlib import Path
 PROJECT_PATH = Path(__file__).absolute().parent
 sys.path.insert(0, str(PROJECT_PATH))
 
-import config as _cg
-from utils.log import log_info as _info
-from utils.log import log_error as _error
 
 """TENSOR CALCULATE"""
 def get_shape_list(tensor, expected_rank=None, name=None):
@@ -87,10 +85,11 @@ def create_initializer(initializer_range=0.02):
 
 """Model Relevant"""
 def create_embedding(vocab_size, embedding_size, name, initializer_range):
-    embedding_table = tf.get_variable(name=name,
-                                      shape=[vocab_size, embedding_size],
-                                      initializer=create_initializer(initializer_range))
-    return embedding_table
+    with tf.variable_scope('create_embedding'):
+        embedding_table = tf.get_variable(name=name,
+                                          shape=[vocab_size, embedding_size],
+                                          initializer=create_initializer(initializer_range))
+        return embedding_table
 
 def create_single_cell_RNN(unit_type,
                            num_units,
