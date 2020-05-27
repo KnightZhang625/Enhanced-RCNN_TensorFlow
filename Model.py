@@ -40,6 +40,10 @@ class ERCNNModel(object):
       sent_B: tf.int32 Tensor, sentence B, expected shape: [batch, seq_length_B].
       sent_length_A: tf.int32 Tensor, the length for the sentence A, expected shape: [batch].
       sent_length_B: tf.int32 Tensor, the length for the sentence B, expected shape: [batch].
+    
+    Attention:
+      `sent_length_A` must be identical to the `sent_length_b`, why? See the `similarity_model` function,
+      click close button if do not understand.
     """
     # config
     config = copy.deepcopy(config)
@@ -55,7 +59,6 @@ class ERCNNModel(object):
     kernel_size = config.kernel_size
     pool_size= config.pool_size
 
-    self.unknown_size = config.unknown_size
     self.initializer_range = config.initializer_range
     self.dropout = config.dropout
     if not is_training:
@@ -112,22 +115,25 @@ class ERCNNModel(object):
     v_b_avg = tf.reduce_mean(V_b, axis=-1)
 
     # concatenate the final output
+    # (b, 3*s_a - 4)
     output_a = tf.concat((v_a_max, cnn_output_A, v_a_avg))
+    # (b, 3*s_b - 4)
     output_b = tf.concat((v_b_max, cnn_output_B, v_b_avg))
 
-  
-  def similarity_model(input_a, input_b):
+  def similarity_model(output_a, output_b):
     def model_func(input_a, input_b):
       with tf.variable_scope('similarity'):
-        w = tf.Variable(tf.truncated_normal([self.seq_length_A, self.unknown_size]), name='w')
+        w = tf.Variable(tf.truncated_normal([self.seq_length_A * 12 - 16, self.seq_length_A]), name='w')
         b = tf.Variable(tf.truncated_normal([1], stddev=0.1), name='b')
-      input_concat = tf.concat((input_a, input_b, input_a - input_b), axis=-1)
+      # (3s - 4) * 4 = 12s - 16
+      input_concat = tf.concat((input_a, input_b, tf.multiply(input_a, input_b), input_a - input_b), axis=-1)
       output = tf.nn.tanh(tf.matmul(input_concat, w) + b)
       return output
     
+    # (b, s)
+    m_oa_mb = model_func(output_a, output_b)
     
-
-
+    
 def RNNEncoder(input_text,
                input_length,
                vocab_size,
@@ -181,40 +187,83 @@ def CNNExtractor(inputs,
                  dropout,
                  initializer_range,
                  scope):
-  
-  for i, ks in enumerate(kernel_size):
-    with tf.variable_scope(scope, default_name='conv_{}'.format(i)):
-      # Conv
-      filter_shape = [ks, ks, 1, 1]
-      W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name='W')
-      b = tf.Variable(tf.constant(0.1, shape=[1]), name='b')
-      conv = tf.nn.conv2d(inputs,
-                          W,
-                          strides=[1, 1, 1, 1],
-                          padding='VALID',
-                          name='conv')
-      # h -> [batch, some_length, some_hidden, 1]
-      h = tf.nn.relu(tf.nn.bias_add(conv, b), name='relu')
-      
-      # Max Pool
-      pooled_max = tf.nn.max_pool(h,
+  # (b, s, h, 1)
+  inputs = tf.expand_dims(inputs, -1)
+
+  # (b, s, h, 1)
+  with tf.variable_scope('conv_1'):
+    filter_shape = [kernel_size[0], kernel_size[0], 1, 1]
+    h_1 = customized_cnn(inputs, filter_shape)
+    # (b, s, 1, 1)
+    pooled_max_1 = tf.nn.max_pool(h_1,
                                   ksize=[1, 1, pool_size[i], 1],
-                                  strides=[1, 1, 1, 1],
                                   padding='VALID',
                                   name='max_pool')
-      # Average Pool
-      pooled_avg = tf.nn.avg_pool(h,
+    # (b, s, 1, 1)
+    pooled_avg_1 = tf.nn.avg_pool(h_1,
+                                ksize=[1, 1, pool_size[i], 1],
+                                strides=[1, 1, 1, 1],
+                                padding='VALID',
+                                name='avg_pool')
+
+  # (b, s-2+1, h-2+1, 1)
+  with tf.variable_scope('conv_2'):
+    filter_shape = [kernel_size[1], kernel_size[1], 1, 1]
+    h_2 = customized_cnn(h_1, filter_shape)
+    # (b, s-2+1, 1, 1)
+    pooled_max_2 = tf.nn.max_pool(h_2,
                                   ksize=[1, 1, pool_size[i], 1],
-                                  strides=[1, 1, 1, 1],
                                   padding='VALID',
-                                  name='avg_pool')
-      
-      # Concatenate
-      pooled_max = tf.squeeze(pooled_max)
-      pooled_avg = tf.squeeze(pooled_avg)
-      output = tf.concat((pooled_max, pooled_avg), axis=-1)
+                                  name='max_pool')
+    # (b, s-2+1, 1, 1)
+    pooled_avg_2 = tf.nn.avg_pool(h_2,
+                                ksize=[1, 1, pool_size[i], 1],
+                                strides=[1, 1, 1, 1],
+                                padding='VALID',
+                                name='avg_pool')
   
+  # (b, s-3+1, h-3+1, 1)
+  with tf.variable_scope('conv_3'):
+    filter_shape = [kernel_size[2], kernel_size[2], 1, 1]
+    h_3 = customized_cnn(h_2, filter_shape)
+    # (b, s-3+1, 1, 1)
+    pooled_max_3 = tf.nn.max_pool(h_3,
+                                  ksize=[1, 1, pool_size[i], 1],
+                                  padding='VALID',
+                                  name='max_pool')
+    # (b, s-3+1, 1, 1)
+    pooled_avg_3 = tf.nn.avg_pool(h_3,
+                                ksize=[1, 1, pool_size[i], 1],
+                                strides=[1, 1, 1, 1],
+                                padding='VALID',
+                                name='avg_pool')
+
+  pooled_max_1 = tf.squeeze(pooled_max_1)
+  pooled_avg_1 = tf.squeeze(pooled_avg_1)
+  pooled_max_2 = tf.squeeze(pooled_max_2)
+  pooled_avg_2 = tf.squeeze(pooled_avg_2)
+  pooled_max_3 = tf.squeeze(pooled_max_3)
+  pooled_avg_3 = tf.squeeze(pooled_avg_3)
+
+  # (b, s-4)
+  output = tf.concat((pooled_max_1, pooled_avg_1,
+                      pooled_max_2, pooled_avg_2,
+                      pooled_max_3, pooled_avg_3)
+                      axis=-1)
+
   return output
+
+def customized_cnn(inputs, filter_shape):
+  with tf.variable_scope('conv_1'):
+    W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name='W')
+    b = tf.Variable(tf.truncated_normal([1], stddev=0.1), name='b')
+    conv = tf.nn.conv2d(inputs,
+                        W,
+                        strides=[1, 1, 1, 1],
+                        padding='VALID',
+                        name='conv')
+    h = tf.nn.relu(tf.nn.bias_add(conv, b), name='relu')
+    return h
 
 def AttentionLayer(query,
                    value):
