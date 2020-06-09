@@ -144,9 +144,9 @@ class ERCNNModel(object):
   def similarity_model(self, output_a, output_b):
     def model_func(input_a, input_b, scope):
       with tf.variable_scope(scope):
-        shape = [(self.sent_length_A[0] * 8 - 8) * 4, self.sent_length_A[0] * 8 - 8]
+        shape = [(30 * 8 - 8) * 4, 30 * 8 - 8]
         w = tf.Variable(tf.truncated_normal(shape, stddev=0.1), name='w')
-        b = tf.Variable(tf.truncated_normal([self.sent_length_A[0] * 8 - 8], stddev=0.1), name='b')
+        b = tf.Variable(tf.truncated_normal([30 * 8 - 8], stddev=0.1), name='b')
       input_concat = tf.concat((input_a, input_b, tf.multiply(input_a, input_b), input_a - input_b), axis=-1)
 
       output = tf.nn.tanh(tf.nn.bias_add(tf.matmul(input_concat, w), b))
@@ -155,7 +155,7 @@ class ERCNNModel(object):
     def build_gate(input_a, input_b, scope):
       with tf.variable_scope(scope):
         input_concat = tf.concat((input_a, input_b), axis=-1)
-        w_g = tf.Variable(tf.truncated_normal([(self.sent_length_A[0] * 8 - 8) * 2, self.sent_length_A[0] * 8 - 8]), name='w')
+        w_g = tf.Variable(tf.truncated_normal([(30 * 8 - 8) * 2, 30 * 8 - 8]), name='w')
         # (b, seq_length)
         gate = tf.sigmoid(tf.matmul(input_concat, w_g))
       return gate
@@ -173,6 +173,9 @@ class ERCNNModel(object):
     output_concat = tf.concat((output_a, output_b), axis=-1)
 
     return output_concat
+  
+  def get_output(self):
+    return self.output
     
 def RNNEncoder(input_text,
                input_length,

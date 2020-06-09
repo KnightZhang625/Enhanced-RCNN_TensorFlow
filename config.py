@@ -19,10 +19,13 @@ SOS_ID = 1
 EOS_ID = 2
 PADDING_ID = 3
 
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 TRIAN_STEPS = 100000
 QUE_PATH = PROJECT_PATH / 'data/question.data'
 ANS_PATH = PROJECT_PATH / 'data/answer.data'
+
+DATA_PATH = PROJECT_PATH / 'data/all.data'
+DIST_PATH = PROJECT_PATH / 'data/vocab_idx.bin'
 
 def forbid_new_attributes(wrapped_setatrr):
     def __setattr__(self, name, value):
@@ -41,16 +44,19 @@ class NoNewAttrs(object):
 
 class NmtConfig(NoNewAttrs):
         # Encoder
-        src_vocab_size = 7819
-        embedding_size = 32
+        vocab_size = 10509
+        embedding_size = 160
         num_layers = 2
-        num_units = 32
+        hidden_size = 320
         forget_bias = 1.0
         dropout = 0.2
         residual_or_not = True  
 
+        kernel_size = [1, 2, 3]
+        pool_size = [640, 639, 637]
+
         # Decoder
-        tgt_vocab_size = 7819 
+        tgt_vocab_size = 10509 
         max_len_infer = 50
 
         encoder_type = RNN_ENCODER_TYPE_BI
@@ -59,10 +65,9 @@ class NmtConfig(NoNewAttrs):
         # global
         model_dir = 'models/'
         initializer_range = 0.02
-        learning_rate = 5e-3
-        lr_limit = 5e-3
+        learning_rate = 1e-4
+        lr_limit = 1e-4
         colocate_gradients_with_ops = True
 
-        segment_size = 2
-
 nmt_config = NmtConfig()
+  
